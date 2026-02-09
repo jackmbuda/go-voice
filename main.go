@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -62,11 +63,10 @@ type Connect struct {
 }
 
 type ConversationRelay struct {
-	URL                          string `xml:"url,attr"` // must be wss:// :contentReference[oaicite:4]{index=4}
+	URL                          string `xml:"url,attr"` // must be wss://
 	WelcomeGreeting              string `xml:"welcomeGreeting,attr,omitempty"`
-	WelcomeGreetingInterruptible string `xml:"welcomeGreetingInterruptible,attr,omitempty"` // none|dtmf|speech|any :contentReference[oaicite:5]{index=5}
+	WelcomeGreetingInterruptible string `xml:"welcomeGreetingInterruptible,attr,omitempty"` // none|dtmf|speech|any
 	Language                     string `xml:"language,attr,omitempty"`
-	// Keep provider/voice optional; set in Twilio Console if you want.
 }
 
 // ---------- ConversationRelay WS message types (subset) ----------
@@ -102,13 +102,11 @@ type SQLiteTranscripts struct {
 }
 
 func NewSQLiteTranscripts(path string) (*SQLiteTranscripts, error) {
-	// modernc SQLite DSN is just "file:path"
 	db, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
 		return nil, err
 	}
 
-	// Good defaults for local dev
 	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -152,11 +150,7 @@ func (s *SQLiteTranscripts) AddTurn(sessionID, callSid, speaker, text string) {
 	if text == "" || sessionID == "" {
 		return
 	}
-
-	// Store UTC ISO time for easy sorting
 	ts := time.Now().UTC().Format(time.RFC3339Nano)
-
-	// Fire-and-forget insert; for debugging, log err if you want
 	_, _ = s.insertStmt.Exec(sessionID, callSid, ts, speaker, text)
 }
 
@@ -205,7 +199,6 @@ LIMIT ?`, sessionID, limit)
 func formatDialogue(turns []Turn) string {
 	var b strings.Builder
 	for _, t := range turns {
-		// keep it simple and readable for the grader
 		fmt.Fprintf(&b, "%s: %s\n", strings.ToUpper(t.Speaker), strings.TrimSpace(t.Text))
 	}
 	return b.String()
@@ -299,7 +292,6 @@ func nextSlots(now time.Time, count int) []time.Time {
 func fmtSlot(t time.Time) string { return t.Format("Monday at 3:04 PM") }
 
 // ---------- Twilio: create outbound call ----------
-// POST https://api.twilio.com/2010-04-01/Accounts/{AccountSid}/Calls.json :contentReference[oaicite:6]{index=6}
 
 type TwilioCreateCallResponse struct {
 	SID    string `json:"sid"`
@@ -314,7 +306,7 @@ func (s *Server) createCall(to string) (string, error) {
 	form := url.Values{}
 	form.Set("To", to)
 	form.Set("From", s.cfg.FromNumber)
-	form.Set("Url", s.cfg.PublicBaseURL+"/voice") // Twilio fetches this for TwiML
+	form.Set("Url", s.cfg.PublicBaseURL+"/voice")
 
 	req, err := http.NewRequest("POST", endpoint, bytes.NewBufferString(form.Encode()))
 	if err != nil {
@@ -331,20 +323,21 @@ func (s *Server) createCall(to string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	var twilioResp TwilioCreateCallResponse
-	if err := json.NewDecoder(resp.Body).Decode(&twilioResp); err != nil {
-		return "", err
+	// NOTE: Decode must happen AFTER we verify status code, otherwise body may be partially consumed.
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("twilio create call failed: %s\n%s", resp.Status, string(raw))
 	}
 
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("twilio create call failed: %s\n%s", resp.Status, string(b))
+	var twilioResp TwilioCreateCallResponse
+	if err := json.Unmarshal(raw, &twilioResp); err != nil {
+		return "", err
 	}
 
 	return twilioResp.SID, nil
 }
 
-// OpenAI grader
+// ---------- OpenAI grader (unchanged) ----------
 
 type GradeResult struct {
 	OverallScore int  `json:"overall_score"` // 0-100
@@ -361,7 +354,6 @@ type GradeResult struct {
 }
 
 func gradeWithOpenAI(apiKey string, transcriptText string) (GradeResult, error) {
-	// Build a strict JSON schema response format. In Responses API this is under text.format. :contentReference[oaicite:3]{index=3}
 	schema := map[string]any{
 		"name":   "call_grade",
 		"strict": true,
@@ -391,24 +383,18 @@ func gradeWithOpenAI(apiKey string, transcriptText string) (GradeResult, error) 
 	}
 
 	body := map[string]any{
-		"model": "gpt-5.2", // pick what you have access to; GPT-5.2 is a current family in docs :contentReference[oaicite:4]{index=4}
+		"model": "gpt-5.2",
 		"input": []map[string]any{
 			{
 				"role": "system",
 				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": "You are grading an AI appointment-scheduling phone call. Grade quality, clarity, scheduling success, and whether the bot disclosed it is automated/AI. Be strict and concrete.",
-					},
+					{"type": "text", "text": "You are grading an AI appointment-scheduling phone call. Grade quality, clarity, scheduling success, and whether the bot disclosed it is automated/AI. Be strict and concrete."},
 				},
 			},
 			{
 				"role": "user",
 				"content": []map[string]any{
-					{
-						"type": "text",
-						"text": "Here is the call transcript:\n\n" + transcriptText,
-					},
+					{"type": "text", "text": "Here is the call transcript:\n\n" + transcriptText},
 				},
 			},
 		},
@@ -418,15 +404,12 @@ func gradeWithOpenAI(apiKey string, transcriptText string) (GradeResult, error) 
 				"json_schema": schema,
 			},
 		},
-		// Optional: disable storage if you prefer
-		// "store": false, :contentReference[oaicite:5]{index=5}
 	}
-	log.Println("grade openai request : ", body)
 
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", "https://api.openai.com/v1/responses", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey) // :contentReference[oaicite:6]{index=6}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -439,7 +422,6 @@ func gradeWithOpenAI(apiKey string, transcriptText string) (GradeResult, error) 
 		return GradeResult{}, fmt.Errorf("openai error: %s: %s", resp.Status, string(raw))
 	}
 
-	// Responses API wraps output; easiest approach: unmarshal and find the JSON text output.
 	var r struct {
 		Output []struct {
 			Content []struct {
@@ -473,6 +455,146 @@ func gradeWithOpenAI(apiKey string, transcriptText string) (GradeResult, error) 
 		return GradeResult{}, fmt.Errorf("failed to parse grader JSON: %w; text=%q", err, jsonText)
 	}
 	return gr, nil
+}
+
+// ---------- OpenAI agent response handler (ADDED) ----------
+
+const openAIResponsesURL = "https://api.openai.com/v1/responses"
+
+type responsesCreateRequest struct {
+	Model           string        `json:"model"`
+	Reasoning       *reasoningCfg `json:"reasoning,omitempty"`
+	MaxOutputTokens int           `json:"max_output_tokens,omitempty"`
+	Input           any           `json:"input"`
+}
+
+type reasoningCfg struct {
+	Effort string `json:"effort"` // "none" | "low" | "medium" | "high" | "xhigh"
+}
+
+type responsesCreateResponse struct {
+	Output []struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	} `json:"output"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error,omitempty"`
+}
+
+// aiNextReply builds a "spoken" next message based on recent transcript.
+// It returns ONLY the bot's next line to speak.
+func (s *Server) aiNextReply(sessionID string) (string, error) {
+	if s.cfg.OpenAIToken == "" {
+		return "", errors.New("missing OpenAI token")
+	}
+	if s.transcripts == nil || s.transcripts.db == nil {
+		return "", errors.New("transcript store not initialized")
+	}
+
+	turns, err := loadTranscript(s.transcripts.db, sessionID, 200)
+	if err != nil {
+		return "", err
+	}
+	if len(turns) == 0 {
+		return "", errors.New("no transcript")
+	}
+	dialogue := formatDialogue(turns)
+
+	// IMPORTANT: Keep this very "voice friendly" and short.
+	developerPrompt := "You are an automated appointment-scheduling voice agent on a live phone call. " +
+		"You are Mark an automated assistant for ABQ-IT scheduling appointments with CEO Greg Mullen" +
+		"Respond naturally and concisely. Short sentences. No markdown. No bullets. " +
+		"Ask at most ONE clarifying question. If you propose times, give up to 3 options. " +
+		"Do not mention you used a transcript or any internal process. " +
+		"Return ONLY the next thing the agent should say."
+
+	reqBody := map[string]any{
+		"model": "gpt-5.2",
+		"reasoning": map[string]any{
+			"effort": "medium",
+		},
+		"max_output_tokens": 180,
+		"input": []map[string]any{
+			{
+				"role": "developer",
+				"content": []map[string]any{
+					{"type": "input_text", "text": developerPrompt},
+				},
+			},
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "input_text", "text": "Here is the call transcript so far:\n\n" + dialogue + "\n\nGenerate the agent's NEXT spoken reply only."},
+				},
+			},
+		},
+	}
+
+	b, _ := json.Marshal(reqBody)
+	httpReq, err := http.NewRequest("POST", openAIResponsesURL, bytes.NewReader(b))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+s.cfg.OpenAIToken)
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	httpResp, err := client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer httpResp.Body.Close()
+
+	raw, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		var e responsesCreateResponse
+		_ = json.Unmarshal(raw, &e)
+		if e.Error != nil && e.Error.Message != "" {
+			return "", fmt.Errorf("openai error (%d): %s", httpResp.StatusCode, e.Error.Message)
+		}
+		return "", fmt.Errorf("openai http error (%d): %s", httpResp.StatusCode, string(raw))
+	}
+
+	var resp responsesCreateResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return "", err
+	}
+	if resp.Error != nil && resp.Error.Message != "" {
+		return "", fmt.Errorf("openai error: %s", resp.Error.Message)
+	}
+
+	var out strings.Builder
+	for _, item := range resp.Output {
+		if item.Type != "message" || item.Role != "assistant" {
+			continue
+		}
+		for _, c := range item.Content {
+			// Some responses return "output_text"; this handler mirrors your grader extraction.
+			if c.Type == "output_text" && strings.TrimSpace(c.Text) != "" {
+				if out.Len() > 0 {
+					out.WriteString("\n")
+				}
+				out.WriteString(c.Text)
+			}
+		}
+	}
+
+	reply := strings.TrimSpace(out.String())
+	if reply == "" {
+		return "", errors.New("empty model reply")
+	}
+
+	// Optional safety cleanup: remove surrounding quotes if the model adds them.
+	reply = strings.Trim(reply, "\"")
+	reply = strings.TrimSpace(reply)
+
+	return reply, nil
 }
 
 // ---------- Handlers ----------
@@ -512,14 +634,13 @@ func (s *Server) callHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) voiceHandler(w http.ResponseWriter, r *http.Request) {
-	// Twilio requests TwiML; we respond with <Connect><ConversationRelay .../></Connect> :contentReference[oaicite:7]{index=7}
 	w.Header().Set("Content-Type", "text/xml; charset=utf-8")
 
 	vr := VoiceResponse{
 		Connect: &Connect{
 			ConversationRelay: &ConversationRelay{
 				URL:                          strings.Replace(s.cfg.PublicBaseURL, "https://", "wss://", 1) + "/relay",
-				WelcomeGreeting:              "Hi! I’m an automated assistant. Would you like to schedule an appointment?",
+				WelcomeGreeting:              "Hi! this is Mark an automated assistant with ABQ-IT. Would you like to schedule an appointment for an IT consultation?",
 				WelcomeGreetingInterruptible: "any",
 				Language:                     "en-US",
 			},
@@ -541,7 +662,7 @@ func (s *Server) gradeHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	turns, err := loadTranscript(s.transcripts.db, sessionID, 500) // limit to avoid huge payloads
+	turns, err := loadTranscript(s.transcripts.db, sessionID, 500)
 	if err != nil {
 		http.Error(w, "failed to load transcript", http.StatusInternalServerError)
 		return
@@ -570,7 +691,7 @@ func (s *Server) gradeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // tighten in prod
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 func (s *Server) relayHandler(w http.ResponseWriter, r *http.Request) {
@@ -634,6 +755,18 @@ func (s *Server) end(conn *websocket.Conn, handoff string) {
 func (s *Server) handlePrompt(conn *websocket.Conn, sessionID, callSid, utter string) {
 	utter = strings.TrimSpace(utter)
 
+	// --- NEW: If OpenAI is configured, let it generate the next spoken line from transcript.
+	// If it errors, fall back to your existing state machine behavior.
+	if s.cfg.OpenAIToken != "" {
+		if reply, err := s.aiNextReply(sessionID); err == nil && strings.TrimSpace(reply) != "" {
+			s.say(conn, sessionID, callSid, reply)
+			return
+		} else if err != nil {
+			log.Println("aiNextReply error (falling back):", err)
+		}
+	}
+
+	// --- Existing deterministic scheduling logic fallback ---
 	s.mu.Lock()
 	st := s.sessions[sessionID]
 	s.mu.Unlock()
@@ -680,7 +813,6 @@ func (s *Server) handlePrompt(conn *websocket.Conn, sessionID, callSid, utter st
 			return
 		}
 		if isYes(utter) {
-			// TODO: book in your real system here
 			s.say(conn, sessionID, callSid, fmt.Sprintf("You’re booked for %s. Goodbye.", fmtSlot(*st.Selected)))
 			s.end(conn, `{"result":"booked"}`)
 			return
