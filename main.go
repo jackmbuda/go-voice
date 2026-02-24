@@ -508,7 +508,7 @@ func (s *Server) aiNextReply(sessionID string) (string, error) {
 
 	// IMPORTANT: Keep this very "voice friendly" and short.
 	developerPrompt := "You are an automated appointment-scheduling voice agent on a live phone call. " +
-		"You are Mark an automated assistant for ABQ-IT scheduling appointments with CEO Greg Mullen" +
+		"You are Mark an automated assistant for <company-name> scheduling appointments with <user-name>" +
 		"Respond naturally and concisely. Short sentences. No markdown. No bullets. " +
 		"Ask at most ONE clarifying question. If you propose times, give up to 3 options. " +
 		"Do not mention you used a transcript or any internal process. " +
