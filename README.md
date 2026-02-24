@@ -94,9 +94,8 @@ The `sessionID` corresponds to the Twilio Call SID returned by the create-call A
 - Installed Go
 - Twilio account with a phone number
 - Public HTTPS URL (required for Twilio webhooks/relay)
-
-1. Set up environment variables.
-2. Run the server using `go run .`.
+- Set up environment variables.
+- Run the server using `go run .`.
 
 Example Requests:
 
